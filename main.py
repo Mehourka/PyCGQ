@@ -8,40 +8,57 @@ from skimage.segmentation import slic
 import time
 import scipy
 from sklearn.ensemble import RandomForestClassifier
+import matplotlib.pyplot as plt
+
+#input
+Ortho_fn = 'C:/GIS/PyCGQ/Tests/Classif4_Ortho.tif'
+DEM_fn = 'Ajouter le chemin'
+train_fn = 'C:/GIS/PyCGQ/Tests/shp/train.shp'
+
+#Output
+segments_fn = 'C:/GIS/PyCGQ/Tests/Results/segmSlic.tif'
+predictions_fn = 'C:/GIS/PyCGQ/Tests/Results/prediction_classes.tif'
 
 
-        #Set File Path
-        # Read Raster DataSet
-Test_fn = 'C:/CGQ/PyTest/Ortho_clip1.tif'
-Ortho_ds = gdal.Open(Test_fn)
+#Lecture de l'Ortho mosaique vis GDAL
+Ortho_ds = gdal.Open(Ortho_fn)
 nbands = Ortho_ds.RasterCount
 
-
-# print(type( ma.masked_equal(Ortho_ds.GetRasterBand(1).ReadAsArray() , 0 )  )  )
-
-        #Read bands as arrays and Stack
+# Transformation des données en numpy array et supperposition
 band_data = []
 for i in range(1,nbands):
     band =  Ortho_ds.GetRasterBand(i).ReadAsArray()
-    band_data.append(band)
+    band_data.append(1.0*band)
+    
+#superposition (stack) des bandes dans un seul fichier
 band_data = np.dstack(band_data)
 print(band_data.shape)
 
-        #rescale values from 0 to 1
-# img = ma.masked_equal(exposure.rescale_intensity(band_data),0)
+# Rescale des valeurs (etiremment à un nouvel interval)
+
 img =exposure.rescale_intensity(band_data)
-# print(img)
+print(np.min(img),np.max(img))
 
-#print("this is IMG rescale", img)
+#fonction pour masquer des valeurs en cas de bug (eg: nan)  
+        # img = ma.masked_equal(exposure.rescale_intensity(band_data),0)
 
-        #segmentation
+
+
+                                                    ####################        Segmentation        #####################
 print("segments start")
 seg_start = time.time()
+ #Ici on choisi la methode de segmentation
+"""
+                     # # Créer un fichier séparer avec differents methodes de segmentation.
+"""
 segments = quickshift(img, convert2lab=0)
-# segments = (img, n_segments=500000, compactness=0.1)
+# segments = slic(img, n_segments = 50000, compactness=5)
 
-        #create seg raster
-segments_fn = 'C:/CGQ/PyTest/segmClipFinal4.tif'
+print("Segmentation complète, {} segments crée en {} secondes".format(np.max(segments),time.time() - seg_start) )
+
+
+
+#Ecriture de la segmentation sur un fichier .tif 
 driverTiff = gdal.GetDriverByName('GTiff')
 segments_ds = driverTiff.Create(segments_fn, Ortho_ds.RasterXSize, Ortho_ds.RasterYSize,
                                 1, gdal.GDT_Float32)
@@ -49,14 +66,24 @@ segments_ds.SetGeoTransform(Ortho_ds.GetGeoTransform())
 segments_ds.SetProjection(Ortho_ds.GetProjectionRef())
 segments_ds.GetRasterBand(1).WriteArray(segments)
 segments_ds = None
+"""
+            # # Créer une fonction dans un autre modul pour alleger le code
+    
+"""
 
-## Ouvrire le fichier sans re calculer
-# segments_ds = gdal.Open('C:/CGQ/PyTest/segmClipFinal.tif')
-# segments = segments_ds.GetRasterBand(1).ReadAsArray()
-# segments_ds = None
 
-print("segments complete", time.time() - seg_start)
 
+
+
+
+#                                            ******************* Calcule des Statistiques *****************************
+# # Pour ouvrire un fichier de segmentation sans re calculer
+        # segments_ds = gdal.Open('C:/CGQ/PyTest/segmClipFinal.tif')
+        # segments = segments_ds.GetRasterBand(1).ReadAsArray()
+        # segments_ds = None
+
+
+# fonction de calcule des statistiques pour chaque segment
 def segment_features(segment_pixels):
     features = []
     npixels, nbands = segment_pixels.shape
@@ -69,11 +96,28 @@ def segment_features(segment_pixels):
     return features
 
 objStart = time.time()
-segment_ids = np.unique(segments)
+
+#Selection des segments dans la zone d'interet
+allsegments = np.unique(segments)
+out_segments = np.unique(segments[img[:,:,1]==0])
+segment_ids = np.setdiff1d(allsegments, out_segments)
+
+
+innersegms = np.zeros_like(band)
+for i in segment_ids[:500]:
+    innersegms = np.add(innersegms, segments == i)
+    
+plt.imshow(innersegms)
+plt.show()
+
+
+
+
+
 objects=[]
 object_ids =[]
 #loop in ids
-print("debut calcule statistiques")
+print(f"debut calcule statistiques pour {np.max(segment_ids)}")
 for id in segment_ids:
     segment_pixels = img[segments == id]
     # print(segment_pixels.shape)
@@ -82,21 +126,17 @@ for id in segment_ids:
     object_ids.append(id)
 
 print("fin calcule statistique")
-print('created', len(objects), 'objects with', len(objects[0]),'variables in',
+print('creation de ', len(objects), 'objets avec', len(objects[0]),'variables en',
       time.time()-objStart, 's')
 
-# from id in segment_ids:
-#     segmentPixels =img
 
+ #                                     **********************       Données d'entrainement        *************************************
 
+#Lectuer des données d'entrainement (shapeFile)
 
-
-
-#Read train shape file
-train_fn = 'C:/CGQ/PyTest/Shp/train.shp'
+print("lecture des données d'entrainement")
 train_ds = ogr.Open(train_fn)
 lyr = train_ds.GetLayer()
-
 
 #Create raster in memory
 driver = gdal.GetDriverByName('MEM')
@@ -110,7 +150,7 @@ gdal.RasterizeLayer(target_ds, [1], lyr, options=options)
 # now we need to get a two dim array for the data in the train raster
 ground_truth = target_ds.GetRasterBand(1).ReadAsArray()
 classes = np.unique(ground_truth)[1:]
-print('class value', classes)
+print('Les valeurs des classes sont : ', classes)
 
 #find which seg belong to which class
 segments_per_class = {}
@@ -119,18 +159,28 @@ for klass in classes:
     segments_per_class[klass] = set(segments_of_class)
     print('training segments for class', klass, ':', len(segments_of_class))
 
-#we need to make sure that a set doesnt show in multiple classes
+#Il faut s'assurer que chaque segment ne represente qu'une seule classe (pas de doublons)
 #creating two sets for this
 intersection = set()
 accum = set()
 
 for classes_segments in segments_per_class.values():
     intersection |= accum.intersection(classes_segments)
+    if len(intersection)!= 0: # Si plus d'une classe tombe dans un segment
+        print("**** ATTENTION il y a des doublons dans les donnes d'entrainement ****")
+        kye = (list(segments_per_class.keys())[list(segments_per_class.values()).index(classes_segments)])
+        segments_per_class[kye] = segments_per_class[kye].difference(intersection)
     accum |= classes_segments
-assert len(intersection) == 0, "segment(s) represent different classes"
+# assert len(intersection) == 0, "segment(s) represent different classes"
 
-###### CLASSIFICATION
 
+
+
+                                    ########################         CLASSIFICATION         ########################
+                
+classStart = time.time() 
+
+print("début de la classification")
 #create a train image
 train_img = np.copy(segments)
 #find thershhold to give segments new values ?
@@ -170,13 +220,15 @@ mask[mask == 0.0] = -1.0
 clf = np.multiply(clf, mask)
 clf[clf <0] = -9999.0
 
-clfds = driverTiff.Create('C:/CGQ/PyTest/classified4.tif', Ortho_ds.RasterXSize,
+clfds = driverTiff.Create(predictions_fn, Ortho_ds.RasterXSize,
                           Ortho_ds.RasterYSize, 1, gdal.GDT_Float32)
 clfds.SetGeoTransform(Ortho_ds.GetGeoTransform())
 clfds.SetProjection(Ortho_ds.GetProjectionRef())
 clfds.GetRasterBand(1).SetNoDataValue(-9999.0)
 clfds.GetRasterBand(1).WriteArray(clf)
 clfds = None
+
+print("Classification effectué en ",time.time()-classStart,"s")
 
 target_ds.SetGeoTransform(Ortho_ds.GetGeoTransform())
 target_ds.SetProjection(Ortho_ds.GetProjectionRef())
