@@ -16,29 +16,42 @@ import matplotlib.pyplot as plt
 
 
 # #input
-imgDir = 'C:/GIS/PyCGQ/02-inputs/'
+os.chdir(os.path.dirname(__file__))
 
-Ortho_fn = imgDir+'ORTHO.tif'       ; assert os.path.isfile(Ortho_fn), f"Chemin '{Ortho_fn}' erroné"
-DSM_fn = imgDir+'DSM.tif'       ; assert os.path.isfile(Ortho_fn), f"Chemin '{DSM_fn}' erroné"
+imgDir = '../02-inputs/'
+Ortho_fn = imgDir+'ORTHO-clip.tif'       ; assert os.path.isfile(Ortho_fn), f"Chemin '{Ortho_fn}' erroné"
+DSM_fn = imgDir+'DSM-clip.tif'       ; assert os.path.isfile(Ortho_fn), f"Chemin '{DSM_fn}' erroné"
 train_fn = imgDir+'shape-files/train.shp'       ; assert os.path.isfile(train_fn), f"Chemin '{train_fn}' erroné"
 
 
 #Output
-resultats= 'C:/GIS/PyCGQ/03-resultats/'
+resultats= '../03-resultats/'
 
 if not os.path.isdir(resultats) : os.mkdir(resultats)
 segments_fn = resultats+'segmentation.tif'
 predictions_fn = resultats+'predictions.tif'
 
 #Lecture des donnés de l'ortho
-Ortho_ds, img = functions.readFiles(Ortho_fn)
+Ortho_ds, bdata_ortho = functions.readFiles(Ortho_fn)
+DSM_ds, bdata_dsm =  functions.readFiles(DSM_fn)
 
-#initialisation de l'objet WhiteboxTools
-wbt = WhiteboxTools()
+#Calcule des features avec whiteboxtools (choix des feautres dans le module functions.py)
+wbt_list = functions.wbtfunc(DSM_fn)
 
 
-"""                                                    ####################        Segmentation        #####################"""
-                                                   
+feature_bands = []
+for i in wbt_list:
+    dataset, bands = functions.readFiles(i)
+    feature_bands= np.concatenate((bdata_ortho,bdata_dsm),axis=2)
+
+
+
+img = exposure.rescale_intensity(bdata_ortho)
+
+
+# =============================================================================
+#                                    Segmentation   
+# =============================================================================                                                              
 print("segments start")
 seg_start = time.time()
  #Ici on choisi la methode de segmentation
@@ -52,22 +65,14 @@ print("Segmentation complète, {} segments crée en {} secondes".format(np.max(s
         # segments = segments_ds.GetRasterBand(1).ReadAsArray()
         # segments_ds = None
         
+   
         
-"""                                                     ******************* Calcule des Statistiques *************************"""
+   
+# =============================================================================
+#                              Calcule des Statistiques 
+# =============================================================================
 
-
-
-# fonction de calcule des statistiques pour chaque segment
-def segment_features(segment_pixels):
-    features = []
-    npixels, nbands = segment_pixels.shape
-    for b in range(nbands):
-        stats = scipy.stats.describe(segment_pixels[:, b])
-        band_stats = list(stats.minmax) + list(stats)[2:]
-        if npixels == 1:
-            band_stats[3] =0.0
-        features += band_stats
-    return features
+# img = np.concatenate((bdata_ortho,bdata_dsm),axis=2)
 
 objStart = time.time()
 
@@ -78,17 +83,21 @@ segment_ids = np.setdiff1d(allsegments, out_segments)
 
 
 # Visualisatio des 500 premiers segments (optionnel)
-# innersegms = np.zeros_like(band) ; for i in segment_ids[:500]:  innersegms = np.add(innersegms, segments == i)
-
+# innersegms = np.zeros_like(img[:,:,1]) ;
+# for i in segment_ids:
+#      innersegms = np.add(innersegms, segments == i)
+#      if i % 1000 == 0:
+#          plt.imshow(innersegms)
+#          plt.show()
 
 objects=[]
 object_ids =[]
 #loop in ids
-print(f"debut calcule statistiques pour {np.max(segment_ids)}")
+print(f"debut calcule statistiques pour {np.shape(segment_ids)}")
 for id in segment_ids:
     segment_pixels = img[segments == id]
     # print(segment_pixels.shape)
-    object_features = segment_features(segment_pixels)
+    object_features = functions.segment_features(segment_pixels)
     objects.append(object_features)
     object_ids.append(id)
 
@@ -96,69 +105,62 @@ print("fin calcule statistique")
 print('creation de ', len(objects), 'objets avec', len(objects[0]),'variables en', time.time()-objStart, 's')
 
 
-"                                    **********************       Données d'entrainement        *************************************"
 
-#Lectuer des données d'entrainement (shapeFile)
+
+
+# =============================================================================
+#                           Données d'entrainement 
+# =============================================================================
+
+
+#Read train data (shapeFile)
 print("lecture des données d'entrainement")
 train_ds = ogr.Open(train_fn)
 lyr = train_ds.GetLayer()
-
-#Create raster in memory
+#Rasterize the vector data in memory
 target_ds = functions.writeRaster(lyr, '', Ortho_ds, dtype =gdal.GDT_UInt16, driver= 'MEM')
-# driver = gdal.GetDriverByName('MEM')
-# target_ds = driver.Create('', Ortho_ds.RasterXSize, Ortho_ds.RasterYSize, 1, gdal.GDT_UInt16)
-# target_ds.SetGeoTransform(Ortho_ds.GetGeoTransform())
-# target_ds.SetProjection(Ortho_ds.GetProjectionRef())
-# # options to set raster between 1 and 6 -> nbr of attributes
-# options = ['ATTRIBUTE=idInt']
-# gdal.RasterizeLayer(target_ds, [1], lyr, options=options)
-
-# now we need to get a two dim array for the data in the train raster
+# Read an NpArray
 ground_truth = target_ds.GetRasterBand(1).ReadAsArray()
 classes = np.unique(ground_truth)[1:]
 print('Les valeurs des classes sont : ', classes)
 
 #find which seg belong to which class
-segments_per_class = {}
-for klass in classes:
-    segments_of_class = segments[ground_truth == klass]
-    segments_per_class[klass] = set(segments_of_class)
-    print('training segments for class', klass, ':', len(segments_of_class))
+segments_per_class = functions.segments_per_class(segments,ground_truth)
 
 #Il faut s'assurer que chaque segment ne represente qu'une seule classe (pas de doublons)
-#creating two sets for this
-intersection = set()
-accum = set()
-
-for classes_segments in segments_per_class.values():
-    intersection |= accum.intersection(classes_segments)
-    if len(intersection)!= 0: # Si plus d'une classe tombe dans un segment
-        print("**** ATTENTION il y a des doublons dans les donnes d'entrainement ****")
-        kye = (list(segments_per_class.keys())[list(segments_per_class.values()).index(classes_segments)])
-        segments_per_class[kye] = segments_per_class[kye].difference(intersection)
-    accum |= classes_segments
-# assert len(intersection) == 0, "segment(s) represent different classes"
+functions.intersection_check(segments_per_class)
 
 
 
-
-                                    ########################         CLASSIFICATION         ########################
+# =============================================================================
+#                               CLASSIFICATION
+# =============================================================================
                 
 classStart = time.time() 
 
 print("début de la classification")
 #create a train image
-train_img = np.copy(segments)
-#find thershhold to give segments new values ?
-threshold = train_img.max() + 1
 
-for klass in classes:
-    class_label = threshold + klass
-    for segment_id in segments_per_class[klass]:
-        train_img[train_img == segment_id] = class_label
-# supprime  les segments non identifé et indentifie les segments d'entrainement
-train_img[train_img <= threshold] = 0
-train_img[train_img >= threshold] -= threshold
+
+
+# train_inge = function.XXX(segments, classes, segments_per_class)
+
+# train_img = functions.get_train_img(segments, segments_per_class)
+
+# train_img = np.copy(segments)
+# threshold = train_img.max() + 1
+
+# for klass in classes:
+#     class_label = threshold + klass
+#     for segment_id in segments_per_class[klass]:
+#         train_img[train_img == segment_id] = class_label
+# # supprime  les segments non identifé et indentifie les segments d'entrainement
+# train_img[train_img <= threshold] = 0
+# train_img[train_img >= threshold] -= threshold
+
+
+
+
 
 training_objects = []
 training_labels = []
@@ -193,5 +195,7 @@ clfds.SetProjection(Ortho_ds.GetProjectionRef())
 clfds.GetRasterBand(1).SetNoDataValue(-9999.0)
 clfds.GetRasterBand(1).WriteArray(clf)
 clfds = None
+
+
 
 print("Classification effectué en ",time.time()-classStart,"s")
